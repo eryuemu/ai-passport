@@ -167,11 +167,9 @@ static void audio_task(void *arg) {
                 s_pcm_buf[sample_count++] = adpcm_decode_nibble(byte_val & 0x0F, &predicted, &step_idx);
             }
 
-            size_t bytes_written = 0;
-            esp_err_t ret = bsp_audio_write(s_pcm_buf, sample_count * sizeof(int16_t), &bytes_written, portMAX_DELAY);
-            if (ret == ESP_OK) {
-                s_samples_played += sample_count;
-            }
+            size_t bytes_to_write = (size_t)sample_count * sizeof(int16_t);
+            bsp_audio_write(s_pcm_buf, bytes_to_write);
+            s_samples_played += sample_count;
 
             adpcm_offset += chunk_bytes;
         }

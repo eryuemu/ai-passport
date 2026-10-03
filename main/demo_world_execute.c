@@ -36,7 +36,7 @@ void demo_world_execute_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             if (vol >= 10) vol -= 10; else vol = 0;
             world_execute_player_set_volume(vol);
         }
-    } else if (ev == BSP_BTN_LONG_PRESS) {
+    } else if (ev == BSP_BTN_LONG) {
         if (btn == BSP_BTN_OK) {
             world_execute_player_restart();
         }
