@@ -23,8 +23,8 @@
 static const char *TAG = "main";
 
 static const demo_entry_t DEMOS[] = {
-    { .name = "Bad Apple", .enter = demo_bad_apple_enter, .exit = demo_bad_apple_exit,
-      .key = demo_bad_apple_key, .start = demo_bad_apple_start, .stop = demo_bad_apple_stop },
+    { .name = "World Execute", .enter = demo_world_execute_enter, .exit = demo_world_execute_exit,
+      .key = demo_world_execute_key, .start = demo_world_execute_start, .stop = demo_world_execute_stop },
     { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
       .key = demo_display_key },
     { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,

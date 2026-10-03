@@ -61,11 +61,20 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tinf \
-        tests/test_bad_apple.c \
-        main/tinf/tinflate.c main/tinf/tinfzlib.c main/tinf/adler32.c \
-        -o "${test_dir}/test_bad_apple"
-    "${test_dir}/test_bad_apple"
+    if [ -f "main/world_execute_data.bin" ]; then
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tinf -Itests/demo_stubs \
+            tests/test_world_execute.c \
+            main/tinf/tinflate.c main/tinf/tinfzlib.c main/tinf/adler32.c \
+            -o "${test_dir}/test_world_execute"
+        "${test_dir}/test_world_execute"
+    fi
+    if [ -f "main/bad_apple_data.bin" ]; then
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tinf \
+            tests/test_bad_apple.c \
+            main/tinf/tinflate.c main/tinf/tinfzlib.c main/tinf/adler32.c \
+            -o "${test_dir}/test_bad_apple"
+        "${test_dir}/test_bad_apple"
+    fi
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
