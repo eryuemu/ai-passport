@@ -82,15 +82,16 @@ lv_obj_t *ui_pixel_panel_create(lv_obj_t *parent, int x, int y, int w, int h,
     return panel;
 }
 
-// 赛博大肥鱼 DeepSeek 娘化像素立绘
+// 赛博大肥鱼 (DeepSeek 鲸鱼娘女仆) 像素立绘
 lv_obj_t *ui_pixel_mascot_create(lv_obj_t *parent, int x, int y)
 {
     // 底部左侧：技术遥测字符
-    ui_pixel_label(parent, "> DEEPSEEK", &lv_font_montserrat_14, CYBER_CYAN);
-    lv_obj_t *sub = ui_pixel_label(parent, "> R1 // C3", &lv_font_montserrat_14, CYBER_MUTED);
-    lv_obj_set_pos(sub, 8, 276);
-    lv_obj_t *main_tag = ui_pixel_label(parent, "> DSH_TERMINAL", &lv_font_montserrat_14, CYBER_CYAN);
-    lv_obj_set_pos(main_tag, 8, 256);
+    lv_obj_t *tag1 = ui_pixel_label(parent, "> DEEPSEEK", &lv_font_montserrat_14, CYBER_CYAN);
+    lv_obj_set_pos(tag1, 8, 250);
+    lv_obj_t *tag2 = ui_pixel_label(parent, "> BLUE WHALE", &lv_font_montserrat_14, CYBER_CYAN);
+    lv_obj_set_pos(tag2, 8, 268);
+    lv_obj_t *sub = ui_pixel_label(parent, "> R1 // C3-NODE", &lv_font_montserrat_14, CYBER_MUTED);
+    lv_obj_set_pos(sub, 8, 286);
 
     // 底部右侧：动态科技音频频谱条 (Equalizer Bars)
     block(parent, 180, 280, 4, 14, CYBER_BLUE);
@@ -100,63 +101,60 @@ lv_obj_t *ui_pixel_mascot_create(lv_obj_t *parent, int x, int y)
     block(parent, 212, 264, 4, 30, CYBER_BLUE);
     block(parent, 220, 278, 4, 16, CYBER_CYAN);
 
-    // 中央：赛博大肥鱼 DeepSeek 娘像素形象 (44 x 48)
+    // 中央：蓝色大肥鱼女仆像素形象 (46 x 48)
     lv_obj_t *m = lv_obj_create(parent);
     lv_obj_remove_flag(m, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(m, x, y);
-    lv_obj_set_size(m, 44, 48);
+    lv_obj_set_size(m, 46, 48);
     lv_obj_set_style_bg_opa(m, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(m, 0, 0);
     lv_obj_set_style_pad_all(m, 0, 0);
 
-    // 顶部发光大肥鱼角/鲸鱼鳍天线
-    block(m, 12, 0, 5, 7, CYBER_CYAN);
-    block(m, 27, 0, 5, 7, CYBER_CYAN);
-    block(m, 15, 2, 14, 3, CYBER_BLUE);
+    // 顶部女仆蕾丝发箍 (Maid Ruffle Headdress)
+    block(m, 12, 0, 22, 4, 0xFFFFFF);
+    block(m, 10, 2, 26, 3, 0xE2E8F0);
+    block(m, 8, 1, 4, 4, CYBER_CYAN); // 蝴蝶结
 
-    // DeepSeek 蓝鲸兜帽发型
-    block(m, 8, 6, 28, 20, CYBER_BLUE);
-    // 银白刘海发丝
-    block(m, 11, 10, 22, 16, 0xE2E8F0);
+    // 左右蓝鲸大耳鳍 (Whale Fin Ears)
+    block(m, 2, 8, 8, 8, CYBER_BLUE);
+    block(m, 4, 10, 4, 5, 0xE2E8F0);
+    block(m, 36, 8, 8, 8, CYBER_BLUE);
+    block(m, 38, 10, 4, 5, 0xE2E8F0);
+
+    // 蓝色长发与刘海
+    block(m, 8, 5, 30, 20, CYBER_BLUE);
+    block(m, 12, 9, 22, 16, 0x2563EB); // 渐变浅蓝发丝
     // 萌系粉嫩面容
-    block(m, 13, 13, 18, 12, 0xFFE8D6);
-
-    // 左右赛博耳机/发光传感器
-    block(m, 4, 12, 6, 12, 0x111927);
-    block(m, 6, 14, 2, 8, CYBER_CYAN);
-    block(m, 34, 12, 6, 12, 0x111927);
-    block(m, 36, 14, 2, 8, CYBER_CYAN);
+    block(m, 14, 12, 18, 12, 0xFFE8D6);
 
     // 发光萌系大眼睛 (左眼与右眼)
-    lv_obj_t *left_eye = block(m, 15, 16, 4, 5, CYBER_CYAN);
-    lv_obj_t *right_eye = block(m, 25, 16, 4, 5, CYBER_CYAN);
-    // 深蓝瞳孔
-    block(left_eye, 1, 1, 2, 3, 0x002B66);
-    block(right_eye, 1, 1, 2, 3, 0x002B66);
+    lv_obj_t *left_eye = block(m, 16, 15, 4, 5, CYBER_CYAN);
+    lv_obj_t *right_eye = block(m, 26, 15, 4, 5, CYBER_CYAN);
+    block(left_eye, 1, 1, 2, 3, 0x0F172A);
+    block(right_eye, 1, 1, 2, 3, 0x0F172A);
 
     // 腮红点缀
-    block(m, 13, 22, 3, 2, 0xFF99BB);
-    block(m, 28, 22, 3, 2, 0xFF99BB);
+    block(m, 14, 21, 3, 2, 0xF472B6);
+    block(m, 29, 21, 3, 2, 0xF472B6);
 
-    // DeepSeek 赛博机能卫衣 (蓝白配色)
-    block(m, 10, 26, 24, 15, CYBER_BLUE);
-    block(m, 17, 26, 10, 15, 0xFFFFFF); // 白色前襟胸兜
+    // 背后大肥鱼尾巴 (Whale Tail)
+    block(m, 0, 32, 10, 10, CYBER_BLUE);
+    block(m, 0, 30, 4, 4, CYBER_CYAN);
+    block(m, 6, 30, 4, 4, CYBER_CYAN);
 
-    // 卫衣发光电路纹路
-    block(m, 12, 30, 4, 2, CYBER_CYAN);
-    block(m, 28, 30, 4, 2, CYBER_CYAN);
-    block(m, 14, 32, 2, 7, CYBER_CYAN);
-    block(m, 28, 32, 2, 7, CYBER_CYAN);
+    // 女仆装 (深蓝主裙 + 白色围裙)
+    block(m, 11, 24, 24, 16, 0x1E293B);
+    block(m, 15, 24, 16, 16, 0xFFFFFF); // 白色女仆围裙
+    block(m, 21, 32, 4, 3, CYBER_BLUE); // 围裙中央小鲸鱼标
 
-    // 背后摇摆的萌萌大肥鱼尾巴 (露出左后方)
-    block(m, 2, 34, 8, 8, CYBER_BLUE);
-    block(m, 0, 36, 4, 4, CYBER_CYAN);
+    // 蕾丝花边与裙摆
+    block(m, 9, 39, 28, 4, 0xFFFFFF);
 
-    // 赛博机能运动鞋 (踏在科技底座上)
-    block(m, 12, 42, 8, 5, 0x111927);
-    block(m, 24, 42, 8, 5, 0x111927);
-    block(m, 13, 45, 6, 2, CYBER_CYAN);
-    block(m, 25, 45, 6, 2, CYBER_CYAN);
+    // 黑色小皮鞋
+    block(m, 14, 43, 7, 4, 0x0F172A);
+    block(m, 25, 43, 7, 4, 0x0F172A);
+    block(m, 15, 45, 5, 2, 0xFFFFFF);
+    block(m, 26, 45, 5, 2, 0xFFFFFF);
 
     start_blink(left_eye);
     start_blink(right_eye);

@@ -26,7 +26,7 @@ static const char *TAG = "main";
 static const demo_entry_t DEMOS[] = {
     { .name = "World Execute", .enter = demo_world_execute_enter, .exit = demo_world_execute_exit,
       .key = demo_world_execute_key, .start = demo_world_execute_start, .stop = demo_world_execute_stop },
-    { .name = "DeepSeek Cover", .enter = demo_cover_enter, .exit = demo_cover_exit,
+    { .name = "Blue Whale", .enter = demo_cover_enter, .exit = demo_cover_exit,
       .key = demo_cover_key, .start = demo_cover_start, .stop = demo_cover_stop },
     { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
       .key = demo_button_key },
@@ -104,7 +104,7 @@ static void enter_menu(void) {
 }
 
 static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
+    if ((event == BSP_BTN_LONG || event == BSP_BTN_DOUBLE) && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
     if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
     if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
     if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
@@ -122,13 +122,16 @@ static void process_input(const input_event_t *input) {
             esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
             if (e != ESP_OK) {
                 ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-                return;
             }
-            if (!bsp_lvgl_lock(500)) return;
-            demo->exit();
-            demo_navigation_complete_exit(&s_navigation);
-            enter_menu();
-            bsp_lvgl_unlock();
+            if (bsp_lvgl_lock(1500)) {
+                demo->exit();
+                demo_navigation_complete_exit(&s_navigation);
+                enter_menu();
+                bsp_lvgl_unlock();
+            } else {
+                ESP_LOGE(TAG, "退出时 LVGL 加锁失败，执行强制退出");
+                demo_navigation_complete_exit(&s_navigation);
+            }
         } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
             demo->key(input->btn, input->event);
         }
@@ -145,10 +148,12 @@ static void process_input(const input_event_t *input) {
     } else if (result.action == DEMO_NAV_ACTION_ENTER) {
         const demo_entry_t *demo = &DEMOS[result.index];
         ui_pixel_mascot_jump(s_mascot);
-        lv_obj_delete(s_menu_scr);
-        s_menu_scr = NULL;
-        s_mascot = NULL;
         demo->enter();
+        if (s_menu_scr) {
+            lv_obj_delete(s_menu_scr);
+            s_menu_scr = NULL;
+            s_mascot = NULL;
+        }
         bsp_lvgl_unlock();
 
         esp_err_t e = demo->start ? demo->start() : ESP_OK;
@@ -250,9 +255,7 @@ void app_main(void) {
     s_ok[7] = true;                                    // Low Power
 
     if (bsp_lvgl_lock(1000)) {
-        // 开机先展示 DeepSeek 赛博朋克大肥鱼娘全屏封面
-        s_navigation.active = 1;
-        demo_cover_enter();
+        enter_menu();
         bsp_lvgl_unlock();
         s_input_ready = true;
     }

@@ -28,8 +28,8 @@ static volatile uint32_t s_samples_played = 0;
 static TaskHandle_t s_audio_task_handle = NULL;
 static TaskHandle_t s_video_task_handle = NULL;
 
-// 调色板缓存 (RGB565 x 4)
-static uint16_t s_palette[4] = { 0x0000, 0x1148, 0x3DFE, 0xFFFF };
+// 调色板缓存 (RGB565 x 4, 大端序存储供 SPI DMA 发送)
+static uint16_t s_palette[4] = { 0x0000, 0x4811, 0xFE3D, 0xFFFF };
 
 // IMA-ADPCM 步长表与索引表
 static const int16_t STEP_TABLE[89] = {
@@ -210,11 +210,11 @@ static void video_task(void *arg) {
         return;
     }
 
-    // 读取固化调色板
-    s_palette[0] = hdr->palette[0];
-    s_palette[1] = hdr->palette[1];
-    s_palette[2] = hdr->palette[2];
-    s_palette[3] = hdr->palette[3];
+    // 读取固化调色板并转换为 ST7789 SPI 大端序 (高字节先发)
+    for (int i = 0; i < 4; i++) {
+        uint16_t p = hdr->palette[i];
+        s_palette[i] = (uint16_t)((p >> 8) | (p << 8));
+    }
 
     // 配置横屏 (Landscape: 320 x 240)
     esp_lcd_panel_swap_xy(panel, true);

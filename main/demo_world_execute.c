@@ -1,17 +1,29 @@
 // main/demo_world_execute.c —— 《world.execute(me);》演示接入
 #include "demo.h"
 #include "world_execute.h"
+#include "lvgl.h"
 #include "esp_log.h"
 
 static const char *TAG = "demo_world_execute";
+static lv_obj_t *s_wexe_scr = NULL;
 
 void demo_world_execute_enter(void) {
     ESP_LOGI(TAG, "进入 world.execute(me); 演示");
+    // 创建一个合法的纯黑 LVGL 屏幕，保证 LVGL 调度器始终拥有 active screen
+    s_wexe_scr = lv_obj_create(NULL);
+    lv_obj_remove_flag(s_wexe_scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_wexe_scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_pad_all(s_wexe_scr, 0, 0);
+    lv_screen_load(s_wexe_scr);
 }
 
 void demo_world_execute_exit(void) {
     ESP_LOGI(TAG, "退出 world.execute(me); 演示");
     world_execute_player_stop();
+    if (s_wexe_scr) {
+        lv_obj_delete(s_wexe_scr);
+        s_wexe_scr = NULL;
+    }
 }
 
 esp_err_t demo_world_execute_start(void) {
