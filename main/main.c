@@ -23,6 +23,8 @@
 static const char *TAG = "main";
 
 static const demo_entry_t DEMOS[] = {
+    { .name = "Bad Apple", .enter = demo_bad_apple_enter, .exit = demo_bad_apple_exit,
+      .key = demo_bad_apple_key, .start = demo_bad_apple_start, .stop = demo_bad_apple_stop },
     { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
       .key = demo_display_key },
     { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
@@ -213,23 +215,24 @@ void app_main(void) {
     demo_navigation_init(&s_navigation, DEMO_COUNT);
 
     // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
+    s_ok[0] = true;                                   // Bad Apple
+    s_ok[1] = true;                                   // Display 已确认可用
     esp_err_t input_err = input_dispatch_init();
     esp_err_t button_err = input_err == ESP_OK
                          ? bsp_button_init(on_key, NULL)
                          : ESP_ERR_INVALID_STATE;
-    s_ok[1] = input_err == ESP_OK && button_err == ESP_OK;
+    s_ok[2] = input_err == ESP_OK && button_err == ESP_OK; // Button
     if (input_err != ESP_OK) {
         ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
     } else if (button_err != ESP_OK) {
         ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
         input_dispatch_deinit();
     }
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
+    s_ok[3] = (bsp_audio_init() == ESP_OK);           // Audio
+    s_ok[4] = (bsp_battery_init() == ESP_OK);         // Battery
+    s_ok[5] = true;                                    // Wi-Fi 页面内按需初始化并显示错误
+    s_ok[6] = true;                                    // BLE
+    s_ok[7] = true;                                    // Low Power
 
     if (bsp_lvgl_lock(1000)) {
         enter_menu();
@@ -237,6 +240,6 @@ void app_main(void) {
         s_input_ready = true;
     }
 
-    ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+    ESP_LOGI(TAG, "就绪:BadApple=%d Display=%d Button=%d Audio=%d Battery=%d",
+             s_ok[0], s_ok[1], s_ok[2], s_ok[3], s_ok[4]);
 }

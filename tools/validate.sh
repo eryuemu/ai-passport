@@ -61,6 +61,11 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tinf \
+        tests/test_bad_apple.c \
+        main/tinf/tinflate.c main/tinf/tinfzlib.c main/tinf/adler32.c \
+        -o "${test_dir}/test_bad_apple"
+    "${test_dir}/test_bad_apple"
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
