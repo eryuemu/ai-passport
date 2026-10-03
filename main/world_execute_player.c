@@ -1,5 +1,6 @@
 // main/world_execute_player.c —— 《world.execute(me);》赛博 2-bit 调色板播放器实现
 #include "world_execute.h"
+#include "demo.h"
 #include "bsp_display.h"
 #include "bsp_audio.h"
 #include "bsp_button.h"
@@ -168,8 +169,12 @@ static void audio_task(void *arg) {
             }
 
             size_t bytes_to_write = (size_t)sample_count * sizeof(int16_t);
-            bsp_audio_write(s_pcm_buf, bytes_to_write);
-            s_samples_played += sample_count;
+            esp_err_t ret = bsp_audio_write(s_pcm_buf, bytes_to_write);
+            if (ret != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            } else {
+                s_samples_played += sample_count;
+            }
 
             adpcm_offset += chunk_bytes;
         }
@@ -177,6 +182,7 @@ static void audio_task(void *arg) {
         if (!s_restart_req && s_running) {
             ESP_LOGI(TAG, "全曲播放完成，自然结束");
             s_running = false;
+            demo_request_exit();
             break;
         }
     }
@@ -293,6 +299,7 @@ static void video_task(void *arg) {
             }
 
             current_frame++;
+            vTaskDelay(pdMS_TO_TICKS(1));
         } else {
             // 视频渲染快于音频进度，等待 5ms 让出 CPU
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -305,7 +312,10 @@ static void video_task(void *arg) {
     esp_lcd_panel_mirror(panel, false, false);
 
     ESP_LOGI(TAG, "视频任务退出");
-    s_running = false;
+    if (s_running) {
+        s_running = false;
+        demo_request_exit();
+    }
     vTaskDelete(NULL);
 }
 
@@ -314,14 +324,35 @@ esp_err_t world_execute_player_start(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    const world_execute_header_t *hdr = (const world_execute_header_t *)world_execute_data_bin_start;
+    if (hdr->magic != WEXE_MAGIC) {
+        ESP_LOGE(TAG, "WEXE 魔数不匹配: 0x%08lX (期望 0x%08X)",
+                 (unsigned long)hdr->magic, WEXE_MAGIC);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = bsp_audio_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_audio_init 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = bsp_audio_set_format(hdr->audio_sample_rate, 16, 1);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_audio_set_format 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    bsp_audio_set_volume(s_volume);
+
     s_running = true;
     s_paused = false;
     s_restart_req = false;
     s_samples_played = 0;
 
-    // 音频任务优先级高于视频任务，保证音频时钟不卡顿
-    BaseType_t ret_a = xTaskCreate(audio_task, "wexe_audio", 4096, NULL, 5, &s_audio_task_handle);
-    BaseType_t ret_v = xTaskCreate(video_task, "wexe_video", 4096, NULL, 4, &s_video_task_handle);
+    // 音频任务优先级高于视频任务，保证音频时钟不卡顿；视频任务赋予 8192 栈以防解压溢出
+    BaseType_t ret_a = xTaskCreatePinnedToCore(audio_task, "wexe_audio", 4096, NULL, 5, &s_audio_task_handle, 0);
+    BaseType_t ret_v = xTaskCreatePinnedToCore(video_task, "wexe_video", 8192, NULL, 4, &s_video_task_handle, 0);
 
     if (ret_a != pdPASS || ret_v != pdPASS) {
         ESP_LOGE(TAG, "创建播放任务失败");
@@ -333,15 +364,11 @@ esp_err_t world_execute_player_start(void) {
 }
 
 esp_err_t world_execute_player_stop(void) {
-    if (!s_running) {
-        return ESP_OK;
+    if (s_running) {
+        s_running = false;
+        s_paused = false;
+        vTaskDelay(pdMS_TO_TICKS(150));
     }
-
-    s_running = false;
-    s_paused = false;
-
-    // 等待任务安全退出
-    vTaskDelay(pdMS_TO_TICKS(150));
 
     s_audio_task_handle = NULL;
     s_video_task_handle = NULL;

@@ -24,7 +24,14 @@ esp_err_t demo_world_execute_stop(void) {
 }
 
 void demo_world_execute_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
-    if (ev == BSP_BTN_PRESS) {
+    // 播放若已结束，任意按键立即触发返回主菜单
+    if (!world_execute_player_is_running()) {
+        ESP_LOGI(TAG, "播放已完成，按键触发返回菜单");
+        demo_request_exit();
+        return;
+    }
+
+    if (ev == BSP_BTN_PRESS || ev == BSP_BTN_CLICK) {
         if (btn == BSP_BTN_OK) {
             world_execute_player_toggle_pause();
         } else if (btn == BSP_BTN_UP) {
@@ -36,9 +43,11 @@ void demo_world_execute_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             if (vol >= 10) vol -= 10; else vol = 0;
             world_execute_player_set_volume(vol);
         }
-    } else if (ev == BSP_BTN_LONG) {
+    } else if (ev == BSP_BTN_LONG || ev == BSP_BTN_DOUBLE) {
+        // 长按或双击 OK 键立即退出到主菜单
         if (btn == BSP_BTN_OK) {
-            world_execute_player_restart();
+            ESP_LOGI(TAG, "按键触发退出到主菜单");
+            demo_request_exit();
         }
     }
 }

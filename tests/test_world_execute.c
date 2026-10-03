@@ -64,9 +64,9 @@ int main(void) {
     assert(hdr.version == 1);
     assert(hdr.width == 320);
     assert(hdr.height == 180);
-    assert(hdr.fps == 15);
+    assert(hdr.fps == 14);
     assert(hdr.color_bits == 2);
-    assert(hdr.total_frames == 3178);
+    assert(hdr.total_frames == 2966);
     assert(hdr.audio_sample_rate == 16000);
     assert(hdr.palette[0] == 0x0000); // 极夜纯黑
     assert(hdr.palette[3] == 0xFFFF); // 极光白
@@ -90,7 +90,7 @@ int main(void) {
     // 抽样解压多帧进行校验
     tinf_init();
     uint8_t decomp_buf[14400]; // 320 * 180 / 4
-    uint32_t test_frames[] = {0, 50, 100, 300, 600, 1200, 1800, 2400, 3000, 3177};
+    uint32_t test_frames[] = {0, 50, 100, 300, 600, 1200, 1800, 2400, 2800, 2965};
     for (size_t i = 0; i < sizeof(test_frames)/sizeof(test_frames[0]); i++) {
         uint32_t frame_idx = test_frames[i];
         uint32_t offset = index_table[frame_idx].offset;

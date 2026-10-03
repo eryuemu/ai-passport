@@ -11,6 +11,7 @@
 #include "bsp_battery.h"
 #include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
 #include "demo.h"
+#include "demo_cover.h"
 #include "demo_navigation.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
@@ -25,8 +26,8 @@ static const char *TAG = "main";
 static const demo_entry_t DEMOS[] = {
     { .name = "World Execute", .enter = demo_world_execute_enter, .exit = demo_world_execute_exit,
       .key = demo_world_execute_key, .start = demo_world_execute_start, .stop = demo_world_execute_stop },
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
-      .key = demo_display_key },
+    { .name = "DeepSeek Cover", .enter = demo_cover_enter, .exit = demo_cover_exit,
+      .key = demo_cover_key, .start = demo_cover_start, .stop = demo_cover_stop },
     { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
       .key = demo_button_key },
     { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
@@ -62,29 +63,37 @@ static volatile bool s_input_ready;
 
 static void menu_refresh(void) {
     for (size_t i = 0; i < DEMO_COUNT; i++) {
-        lv_label_set_text_fmt(s_rows[i], "%s%s",
-                              DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
-        ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
+        bool sel = (i == s_navigation.selected);
+        if (sel) {
+            lv_label_set_text_fmt(s_rows[i], "> %s%s",
+                                  DEMOS[i].name,
+                                  s_ok[i] ? "" : " [FAIL]");
+        } else {
+            lv_label_set_text_fmt(s_rows[i], "%s%s",
+                                  DEMOS[i].name,
+                                  s_ok[i] ? "" : " [FAIL]");
+        }
+        ui_pixel_set_selected(s_cards[i], sel, s_ok[i]);
         lv_obj_set_style_text_color(s_rows[i],
-            s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
+            !s_ok[i] ? lv_color_hex(CYBER_ALERT_RED)
+                     : (sel ? lv_color_hex(CYBER_CYAN) : lv_color_hex(CYBER_WHITE)), 0);
     }
 }
 
 static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
+    s_menu_scr = ui_pixel_screen_create("DEEPSEEK // DSH");
 
     for (size_t i = 0; i < DEMO_COUNT; i++) {
         int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
+        int y = 52 + (int)(i / 2) * 46;
+        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 106, 38, CYBER_PANEL);
         s_rows[i] = lv_label_create(s_cards[i]);
         lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(s_rows[i]);
     }
 
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 101, 242);
+    s_mascot = ui_pixel_mascot_create(s_menu_scr, 98, 246);
 
     menu_refresh();
     lv_screen_load(s_menu_scr);
@@ -192,6 +201,12 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)xQueueSend(s_input_queue, &input, 0);
 }
 
+void demo_request_exit(void) {
+    if (!s_input_ready || !s_input_queue) return;
+    const input_event_t input = { .btn = BSP_BTN_OK, .event = BSP_BTN_LONG };
+    (void)xQueueSend(s_input_queue, &input, pdMS_TO_TICKS(100));
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
     esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
@@ -235,7 +250,9 @@ void app_main(void) {
     s_ok[7] = true;                                    // Low Power
 
     if (bsp_lvgl_lock(1000)) {
-        enter_menu();
+        // 开机先展示 DeepSeek 赛博朋克大肥鱼娘全屏封面
+        s_navigation.active = 1;
+        demo_cover_enter();
         bsp_lvgl_unlock();
         s_input_ready = true;
     }

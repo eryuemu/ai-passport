@@ -13,10 +13,17 @@ typedef struct {
     esp_err_t (*stop)(void);                      // 可选:删页面前,不持 LVGL 锁停止 producer
 } demo_entry_t;
 
+// 全局演示生命周期退出请求（可由播放器或按键在完成时调用）
+void demo_request_exit(void);
+
 // 各演示页(定义在各自的 .c 里)
 void demo_world_execute_enter(void); void demo_world_execute_exit(void);
 void demo_world_execute_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 esp_err_t demo_world_execute_start(void); esp_err_t demo_world_execute_stop(void);
+
+void demo_cover_enter(void); void demo_cover_exit(void);
+void demo_cover_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+esp_err_t demo_cover_start(void); esp_err_t demo_cover_stop(void);
 
 void demo_bad_apple_enter(void); void demo_bad_apple_exit(void);
 void demo_bad_apple_key(bsp_btn_t btn, bsp_btn_ev_t ev);
