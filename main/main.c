@@ -1,265 +1,160 @@
-// main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
+// main/main.c —— FoloToy AI Passport: 《world.execute(me);》 专用播放器固件
 //
-// 按键语义(全局统一):
-//   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
-//   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
+// 纯净直驱架构 (无 LVGL 调度开销与看门狗隐患):
+// 1. 开机直接全屏推流展示 蓝色大肥鱼 赛博朋克二创立绘封面 (240x320)
+// 2. 封面界面按 OK 键即刻开启横屏《world.execute(me);》PV 影音同步播放
+// 3. 播放过程中短按 OK 暂停/继续，UP/DOWN 调节音量，长按或双击 OK 随时退出回封面
+// 4. PV 自然播放结束后，自动平滑切回蓝色大肥鱼封面
 #include "bsp_i2c.h"
 #include "bsp_display.h"
 #include "bsp_button.h"
 #include "bsp_audio.h"
 #include "bsp_battery.h"
-#include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
-#include "demo.h"
-#include "demo_cover.h"
-#include "demo_navigation.h"
-#include "ui_pixel.h"
-#include "lvgl.h"
+#include "cover.h"
+#include "world_execute.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
 static const char *TAG = "main";
 
-static const demo_entry_t DEMOS[] = {
-    { .name = "World Execute", .enter = demo_world_execute_enter, .exit = demo_world_execute_exit,
-      .key = demo_world_execute_key, .start = demo_world_execute_start, .stop = demo_world_execute_stop },
-    { .name = "Blue Whale", .enter = demo_cover_enter, .exit = demo_cover_exit,
-      .key = demo_cover_key, .start = demo_cover_start, .stop = demo_cover_stop },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
-      .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
-      .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
-      .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
-      .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
-      .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
-      .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
-};
-#define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
-#define INPUT_QUEUE_DEPTH 8
+typedef enum {
+    APP_STATE_COVER = 0,
+    APP_STATE_PLAYING,
+} app_state_t;
+
+typedef enum {
+    EV_TYPE_BUTTON = 0,
+    EV_TYPE_PLAYER_DONE,
+} event_type_t;
 
 typedef struct {
-    bsp_btn_t btn;
-    bsp_btn_ev_t event;
-} input_event_t;
+    event_type_t type;
+    bsp_btn_t    btn;
+    bsp_btn_ev_t btn_ev;
+} app_event_t;
 
-// 各外设初始化结果:失败的项在菜单里标 [FAIL] 且不允许进入。
-static bool s_ok[DEMO_COUNT];
+static QueueHandle_t s_evt_queue = NULL;
+static app_state_t   s_state = APP_STATE_COVER;
 
-static lv_obj_t *s_menu_scr;
-static lv_obj_t *s_cards[DEMO_COUNT];
-static lv_obj_t *s_rows[DEMO_COUNT];
-static lv_obj_t *s_mascot;
-static demo_navigation_t s_navigation;
-static QueueHandle_t s_input_queue;
-static TaskHandle_t s_input_task;
-static volatile bool s_input_ready;
-
-static void menu_refresh(void) {
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        bool sel = (i == s_navigation.selected);
-        if (sel) {
-            lv_label_set_text_fmt(s_rows[i], "> %s%s",
-                                  DEMOS[i].name,
-                                  s_ok[i] ? "" : " [FAIL]");
-        } else {
-            lv_label_set_text_fmt(s_rows[i], "%s%s",
-                                  DEMOS[i].name,
-                                  s_ok[i] ? "" : " [FAIL]");
-        }
-        ui_pixel_set_selected(s_cards[i], sel, s_ok[i]);
-        lv_obj_set_style_text_color(s_rows[i],
-            !s_ok[i] ? lv_color_hex(CYBER_ALERT_RED)
-                     : (sel ? lv_color_hex(CYBER_CYAN) : lv_color_hex(CYBER_WHITE)), 0);
-    }
-}
-
-static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("DEEPSEEK // DSH");
-
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 46;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 106, 38, CYBER_PANEL);
-        s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(s_rows[i]);
-    }
-
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 98, 246);
-
-    menu_refresh();
-    lv_screen_load(s_menu_scr);
-}
-
-static void enter_menu(void) {
-    menu_build();
-}
-
-static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if ((event == BSP_BTN_LONG || event == BSP_BTN_DOUBLE) && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
-    if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
-    if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
-    if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
-    if (btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_CLICK;
-    return DEMO_NAV_INPUT_OTHER;
-}
-
-static void process_input(const input_event_t *input) {
-    demo_nav_input_t nav_input = navigation_input(input->btn, input->event);
-
-    if (s_navigation.active >= 0) {
-        demo_nav_result_t result = demo_navigation_handle(&s_navigation, nav_input, true);
-        const demo_entry_t *demo = &DEMOS[result.index];
-        if (result.action == DEMO_NAV_ACTION_EXIT) {
-            esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
-            if (e != ESP_OK) {
-                ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-            }
-            if (bsp_lvgl_lock(1500)) {
-                demo->exit();
-                demo_navigation_complete_exit(&s_navigation);
-                enter_menu();
-                bsp_lvgl_unlock();
-            } else {
-                ESP_LOGE(TAG, "退出时 LVGL 加锁失败，执行强制退出");
-                demo_navigation_complete_exit(&s_navigation);
-            }
-        } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
-            demo->key(input->btn, input->event);
-        }
-        return;
-    }
-
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
-    if (!bsp_lvgl_lock(500)) return;
-    demo_nav_result_t result = demo_navigation_handle(
-        &s_navigation, nav_input, s_ok[s_navigation.selected]);
-    if (result.action == DEMO_NAV_ACTION_REFRESH) {
-        menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (result.action == DEMO_NAV_ACTION_ENTER) {
-        const demo_entry_t *demo = &DEMOS[result.index];
-        ui_pixel_mascot_jump(s_mascot);
-        demo->enter();
-        if (s_menu_scr) {
-            lv_obj_delete(s_menu_scr);
-            s_menu_scr = NULL;
-            s_mascot = NULL;
-        }
-        bsp_lvgl_unlock();
-
-        esp_err_t e = demo->start ? demo->start() : ESP_OK;
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "%s 页面启动失败: %s", demo->name, esp_err_to_name(e));
-        }
-        return;
-    }
-    bsp_lvgl_unlock();
-}
-
-static void input_task(void *arg) {
-    (void)arg;
-    input_event_t input;
-    for (;;) {
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
-            process_input(&input);
-        }
-    }
-}
-
-static esp_err_t input_dispatch_init(void) {
-    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
-    if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "demo_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static void input_dispatch_deinit(void) {
-    s_input_ready = false;
-    if (s_input_task) {
-        vTaskDelete(s_input_task);
-        s_input_task = NULL;
-    }
-    if (s_input_queue) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-    }
-}
-
-// button callbacks run on the shared esp_timer task; enqueue only and return immediately.
-static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
+// 按键事件回调 (在 esp_timer 上下文运行，仅投递队列)
+static void on_button(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
-    if (!s_input_ready || !s_input_queue) return;
-    const input_event_t input = { .btn = btn, .event = ev };
-    (void)xQueueSend(s_input_queue, &input, 0);
+    if (!s_evt_queue) return;
+    app_event_t event = {
+        .type   = EV_TYPE_BUTTON,
+        .btn    = btn,
+        .btn_ev = ev,
+    };
+    (void)xQueueSend(s_evt_queue, &event, 0);
 }
 
-void demo_request_exit(void) {
-    if (!s_input_ready || !s_input_queue) return;
-    const input_event_t input = { .btn = BSP_BTN_OK, .event = BSP_BTN_LONG };
-    (void)xQueueSend(s_input_queue, &input, pdMS_TO_TICKS(100));
+// 播放自然完成回调 (在 audio_task 上下文运行，仅投递队列)
+static void on_player_done(void) {
+    if (!s_evt_queue) return;
+    app_event_t event = {
+        .type = EV_TYPE_PLAYER_DONE,
+    };
+    (void)xQueueSend(s_evt_queue, &event, 0);
+}
+
+static void app_enter_cover(void) {
+    ESP_LOGI(TAG, "切换到封面状态");
+    world_execute_player_stop();
+    cover_draw();
+    s_state = APP_STATE_COVER;
+}
+
+static void app_enter_playing(void) {
+    ESP_LOGI(TAG, "切换到播放状态");
+    s_state = APP_STATE_PLAYING;
+    esp_err_t err = world_execute_player_start(on_player_done);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "启动播放器失败: %s，恢复封面", esp_err_to_name(err));
+        app_enter_cover();
+    }
+}
+
+static void event_loop_task(void *arg) {
+    (void)arg;
+    app_event_t evt;
+    for (;;) {
+        if (xQueueReceive(s_evt_queue, &evt, portMAX_DELAY) == pdTRUE) {
+            if (evt.type == EV_TYPE_PLAYER_DONE) {
+                if (s_state == APP_STATE_PLAYING) {
+                    ESP_LOGI(TAG, "PV 播放自然结束，返回封面");
+                    app_enter_cover();
+                }
+                continue;
+            }
+
+            if (evt.type == EV_TYPE_BUTTON) {
+                bsp_btn_t btn = evt.btn;
+                bsp_btn_ev_t ev = evt.btn_ev;
+
+                if (s_state == APP_STATE_COVER) {
+                    // 封面下点击或按下 OK 键进入播放
+                    if (btn == BSP_BTN_OK && (ev == BSP_BTN_CLICK || ev == BSP_BTN_PRESS)) {
+                        app_enter_playing();
+                    }
+                } else if (s_state == APP_STATE_PLAYING) {
+                    // 播放中按键逻辑
+                    if (btn == BSP_BTN_OK && (ev == BSP_BTN_LONG || ev == BSP_BTN_DOUBLE)) {
+                        ESP_LOGI(TAG, "用户长按/双击 OK 键退出播放");
+                        app_enter_cover();
+                    } else if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
+                        world_execute_player_toggle_pause();
+                    } else if (btn == BSP_BTN_UP && (ev == BSP_BTN_CLICK || ev == BSP_BTN_PRESS)) {
+                        uint8_t vol = world_execute_player_get_volume();
+                        if (vol <= 90) vol += 10; else vol = 100;
+                        world_execute_player_set_volume(vol);
+                    } else if (btn == BSP_BTN_DOWN && (ev == BSP_BTN_CLICK || ev == BSP_BTN_PRESS)) {
+                        uint8_t vol = world_execute_player_get_volume();
+                        if (vol >= 10) vol -= 10; else vol = 0;
+                        world_execute_player_set_volume(vol);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
-    }
+    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, "  FoloToy AI Passport - world.execute(me);");
+    ESP_LOGI(TAG, "  DeepSeek 蓝色大肥鱼 赛博专属固件");
+    ESP_LOGI(TAG, "================================================");
 
     bsp_i2c_init();
     bsp_i2c_scan();
 
-    // 屏幕是本 demo 的 UI 载体,失败就没有菜单可言 —— 打清楚日志后退出,
-    // 不做"串口菜单"降级(那会让本文件复杂一倍,违背参考示例的初衷)。
-    if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "显示/LVGL 初始化失败,demo 无法继续。"
-                      "检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
-                 BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
+    if (bsp_display_init() != ESP_OK) {
+        ESP_LOGE(TAG, "显示屏初始化失败");
         return;
     }
     bsp_display_backlight(100);
 
-    demo_navigation_init(&s_navigation, DEMO_COUNT);
+    bsp_audio_init();
+    bsp_battery_init();
 
-    // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Bad Apple
-    s_ok[1] = true;                                   // Display 已确认可用
-    esp_err_t input_err = input_dispatch_init();
-    esp_err_t button_err = input_err == ESP_OK
-                         ? bsp_button_init(on_key, NULL)
-                         : ESP_ERR_INVALID_STATE;
-    s_ok[2] = input_err == ESP_OK && button_err == ESP_OK; // Button
-    if (input_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
-    } else if (button_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
-        input_dispatch_deinit();
-    }
-    s_ok[3] = (bsp_audio_init() == ESP_OK);           // Audio
-    s_ok[4] = (bsp_battery_init() == ESP_OK);         // Battery
-    s_ok[5] = true;                                    // Wi-Fi 页面内按需初始化并显示错误
-    s_ok[6] = true;                                    // BLE
-    s_ok[7] = true;                                    // Low Power
-
-    if (bsp_lvgl_lock(1000)) {
-        enter_menu();
-        bsp_lvgl_unlock();
-        s_input_ready = true;
+    s_evt_queue = xQueueCreate(16, sizeof(app_event_t));
+    if (!s_evt_queue) {
+        ESP_LOGE(TAG, "创建事件队列失败");
+        return;
     }
 
-    ESP_LOGI(TAG, "就绪:BadApple=%d Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3], s_ok[4]);
+    esp_err_t btn_err = bsp_button_init(on_button, NULL);
+    if (btn_err != ESP_OK) {
+        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(btn_err));
+    }
+
+    // 开机直接绘制蓝色大肥鱼赛博全屏封面
+    cover_draw();
+    s_state = APP_STATE_COVER;
+
+    // 启动主交互事件循环任务
+    xTaskCreate(event_loop_task, "main_evt", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "主系统已就绪，当前处于大肥鱼封面界面");
 }

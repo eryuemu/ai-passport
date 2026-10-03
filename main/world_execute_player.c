@@ -1,9 +1,13 @@
 // main/world_execute_player.c —— 《world.execute(me);》赛博 2-bit 调色板播放器实现
+//
+// 两条硬约束(之前的花屏/卡死都出在这里):
+// 1. esp_lcd 的 SPI 颜色传输是【异步】的:draw_bitmap() 只把 DMA 排进队列就返回，
+//    DMA 还在读缓冲区。因此切片缓冲必须 ping-pong 双缓冲，绝不能填一块正在发送的缓冲。
+//    (下一次 draw_bitmap 发 CASET 命令前，驱动会等待上一笔颜色传输完成。)
+// 2. ST7789 走 SPI 要求 RGB565 高字节先发，ESP32-C3 是小端，所以内存里的像素要先字节交换。
 #include "world_execute.h"
-#include "demo.h"
 #include "bsp_display.h"
 #include "bsp_audio.h"
-#include "bsp_button.h"
 #include "tinf.h"
 #include "esp_log.h"
 #include "esp_lcd_panel_ops.h"
@@ -19,17 +23,19 @@ extern const uint8_t world_execute_data_bin_start[] asm("_binary_world_execute_d
 extern const uint8_t world_execute_data_bin_end[]   asm("_binary_world_execute_data_bin_end");
 
 // 播放状态管理
-static volatile bool s_running = false;
+static volatile bool s_running = false;   // 任务循环条件
 static volatile bool s_paused = false;
-static volatile bool s_restart_req = false;
+static bool s_active = false;             // start 成功后到 stop 完成前为 true
 static uint8_t s_volume = 80;
 static volatile uint32_t s_samples_played = 0;
+static world_execute_done_cb_t s_done_cb = NULL;
 
-static TaskHandle_t s_audio_task_handle = NULL;
-static TaskHandle_t s_video_task_handle = NULL;
+// 任务退出握手:stop() 等这两个信号量，保证返回后没有任何任务再碰屏幕/I2S
+static SemaphoreHandle_t s_audio_done = NULL;
+static SemaphoreHandle_t s_video_done = NULL;
 
-// 调色板缓存 (RGB565 x 4, 大端序存储供 SPI DMA 发送)
-static uint16_t s_palette[4] = { 0x0000, 0x4811, 0xFE3D, 0xFFFF };
+// 调色板缓存 (已字节交换，可直接送 SPI)
+static uint16_t s_palette[4];
 
 // IMA-ADPCM 步长表与索引表
 static const int16_t STEP_TABLE[89] = {
@@ -71,6 +77,8 @@ static inline int16_t adpcm_decode_nibble(uint8_t nibble, int16_t *predicted, in
     return (int16_t)pred;
 }
 
+static inline uint16_t swap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
+
 // 视频渲染配置：320x180 居中显示在 320x240 横屏上 (y 偏移 30..210)
 #define VIDEO_W        320
 #define VIDEO_H        180
@@ -83,169 +91,116 @@ static inline int16_t adpcm_decode_nibble(uint8_t nibble, int16_t *predicted, in
 #define AUDIO_CHUNK_ADPCM_BYTES 256
 #define AUDIO_CHUNK_SAMPLES     (AUDIO_CHUNK_ADPCM_BYTES * 2)
 
-// 静态解码缓冲区 (零动态堆分配)
+#define CLEAR_LINES 8
+
+// 静态缓冲区 (零动态堆分配；.bss 在内部 SRAM，DMA 可直接访问)
 static uint8_t  s_decomp_buf[PACKED_FRAME_BYTES];
-static uint16_t s_dma_slice_buf[VIDEO_W * SLICE_LINES];
+static uint16_t s_slice_buf[2][VIDEO_W * SLICE_LINES] __attribute__((aligned(4)));
+static uint16_t s_black_buf[VIDEO_W * CLEAR_LINES] __attribute__((aligned(4))); // 永远全 0，只读
+static uint16_t s_hud_buf[VIDEO_W * 4] __attribute__((aligned(4)));
 static int16_t  s_pcm_buf[AUDIO_CHUNK_SAMPLES];
 
-static void clear_screen_black_landscape(void) {
-    esp_lcd_panel_handle_t panel = bsp_display_panel();
-    if (!panel) return;
-
-    static uint16_t black_slice[320 * 20];
-    memset(black_slice, 0, sizeof(black_slice));
-    for (int y = 0; y < 240; y += 20) {
-        esp_lcd_panel_draw_bitmap(panel, 0, y, 320, y + 20, black_slice);
+static void clear_screen_black_landscape(esp_lcd_panel_handle_t panel) {
+    for (int y = 0; y < 240; y += CLEAR_LINES) {
+        esp_lcd_panel_draw_bitmap(panel, 0, y, 320, y + CLEAR_LINES, s_black_buf);
     }
 }
 
-// 绘制底部赛博进度条 HUD (Y: 215 ~ 225)
-static void draw_hud_landscape(uint32_t current_frame, uint32_t total_frames) {
-    esp_lcd_panel_handle_t panel = bsp_display_panel();
-    if (!panel || total_frames == 0) return;
-
-    static uint16_t hud_line[320 * 4];
-    memset(hud_line, 0, sizeof(hud_line));
+// 绘制底部赛博进度条 HUD (y 222~225)。每秒一次，上次传输早已完成，可安全复用缓冲。
+static void draw_hud_landscape(esp_lcd_panel_handle_t panel, uint32_t current_frame, uint32_t total_frames) {
+    if (total_frames == 0) return;
+    memset(s_hud_buf, 0, sizeof(s_hud_buf));
 
     int bar_width = (int)((uint64_t)current_frame * 300 / total_frames);
     if (bar_width > 300) bar_width = 300;
 
-    // 绘制 300 像素宽的赛博蓝进度条
     for (int y = 0; y < 4; y++) {
         for (int x = 10; x < 10 + 300; x++) {
-            if (x < 10 + bar_width) {
-                hud_line[y * 320 + x] = s_palette[2]; // 荧光青
-            } else {
-                hud_line[y * 320 + x] = s_palette[1]; // 幽深暗蓝底轨
-            }
+            s_hud_buf[y * 320 + x] = (x < 10 + bar_width) ? s_palette[2] : s_palette[1];
         }
     }
-    esp_lcd_panel_draw_bitmap(panel, 0, 222, 320, 226, hud_line);
+    esp_lcd_panel_draw_bitmap(panel, 0, 222, 320, 226, s_hud_buf);
 }
 
 // 音频播放任务 (主时钟基准)
 static void audio_task(void *arg) {
+    (void)arg;
     const world_execute_header_t *hdr = (const world_execute_header_t *)world_execute_data_bin_start;
     const uint8_t *adpcm_stream = world_execute_data_bin_start + hdr->audio_data_offset;
-    uint32_t total_adpcm_bytes = hdr->audio_data_size;
+    const uint32_t total_adpcm_bytes = hdr->audio_data_size;
 
-    ESP_LOGI(TAG, "音频任务启动: 采样率 %lu Hz, 总音频 %lu 字节 (%.1f 秒)",
-             (unsigned long)hdr->audio_sample_rate,
-             (unsigned long)total_adpcm_bytes,
-             (double)total_adpcm_bytes / (hdr->audio_sample_rate / 2));
+    ESP_LOGI(TAG, "音频任务启动: %lu Hz, %lu 字节",
+             (unsigned long)hdr->audio_sample_rate, (unsigned long)total_adpcm_bytes);
 
-    bsp_audio_set_volume(s_volume);
+    int16_t predicted = 0;
+    int step_idx = 0;
+    uint32_t adpcm_offset = 0;
 
-    while (s_running) {
-        if (s_restart_req) {
-            s_restart_req = false;
-            s_samples_played = 0;
+    while (s_running && adpcm_offset < total_adpcm_bytes) {
+        if (s_paused) {
+            // I2S 配置了 auto_clear，停写后输出静音
+            vTaskDelay(pdMS_TO_TICKS(30));
+            continue;
         }
 
-        int16_t predicted = 0;
-        int step_idx = 0;
-        uint32_t adpcm_offset = 0;
-
-        while (s_running && adpcm_offset < total_adpcm_bytes) {
-            if (s_restart_req) break;
-
-            if (s_paused) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-                continue;
-            }
-
-            uint32_t chunk_bytes = AUDIO_CHUNK_ADPCM_BYTES;
-            if (adpcm_offset + chunk_bytes > total_adpcm_bytes) {
-                chunk_bytes = total_adpcm_bytes - adpcm_offset;
-            }
-
-            const uint8_t *src = adpcm_stream + adpcm_offset;
-            int sample_count = 0;
-
-            for (uint32_t i = 0; i < chunk_bytes; i++) {
-                uint8_t byte_val = src[i];
-                s_pcm_buf[sample_count++] = adpcm_decode_nibble((byte_val >> 4) & 0x0F, &predicted, &step_idx);
-                s_pcm_buf[sample_count++] = adpcm_decode_nibble(byte_val & 0x0F, &predicted, &step_idx);
-            }
-
-            size_t bytes_to_write = (size_t)sample_count * sizeof(int16_t);
-            esp_err_t ret = bsp_audio_write(s_pcm_buf, bytes_to_write);
-            if (ret != ESP_OK) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            } else {
-                s_samples_played += sample_count;
-            }
-
-            adpcm_offset += chunk_bytes;
+        uint32_t chunk_bytes = AUDIO_CHUNK_ADPCM_BYTES;
+        if (adpcm_offset + chunk_bytes > total_adpcm_bytes) {
+            chunk_bytes = total_adpcm_bytes - adpcm_offset;
         }
 
-        if (!s_restart_req && s_running) {
-            ESP_LOGI(TAG, "全曲播放完成，自然结束");
-            s_running = false;
-            demo_request_exit();
-            break;
+        const uint8_t *src = adpcm_stream + adpcm_offset;
+        int sample_count = 0;
+        for (uint32_t i = 0; i < chunk_bytes; i++) {
+            uint8_t byte_val = src[i];
+            s_pcm_buf[sample_count++] = adpcm_decode_nibble((byte_val >> 4) & 0x0F, &predicted, &step_idx);
+            s_pcm_buf[sample_count++] = adpcm_decode_nibble(byte_val & 0x0F, &predicted, &step_idx);
         }
+
+        if (bsp_audio_write(s_pcm_buf, (size_t)sample_count * sizeof(int16_t)) == ESP_OK) {
+            s_samples_played += sample_count;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        adpcm_offset += chunk_bytes;
     }
 
-    ESP_LOGI(TAG, "音频任务退出");
+    const bool natural_end = s_running;   // 循环因播完而退出(而非被 stop)
+    s_running = false;                    // 让视频任务也收尾
+    ESP_LOGI(TAG, "音频任务退出%s", natural_end ? " (全曲播完)" : "");
+
+    world_execute_done_cb_t cb = s_done_cb;
+    xSemaphoreGive(s_audio_done);
+    if (natural_end && cb) cb();
     vTaskDelete(NULL);
 }
 
 // 视频渲染任务 (从属时钟刷新)
 static void video_task(void *arg) {
+    (void)arg;
     esp_lcd_panel_handle_t panel = bsp_display_panel();
-    if (!panel) {
-        ESP_LOGE(TAG, "无法获取显示屏句柄");
-        s_running = false;
-        vTaskDelete(NULL);
-        return;
-    }
-
     const world_execute_header_t *hdr = (const world_execute_header_t *)world_execute_data_bin_start;
-    if (hdr->magic != WEXE_MAGIC) {
-        ESP_LOGE(TAG, "WEXE 魔数不匹配: 0x%08lX (期望 0x%08X)",
-                 (unsigned long)hdr->magic, WEXE_MAGIC);
-        s_running = false;
-        vTaskDelete(NULL);
-        return;
-    }
 
-    // 读取固化调色板并转换为 ST7789 SPI 大端序 (高字节先发)
-    for (int i = 0; i < 4; i++) {
-        uint16_t p = hdr->palette[i];
-        s_palette[i] = (uint16_t)((p >> 8) | (p << 8));
-    }
-
-    // 配置横屏 (Landscape: 320 x 240)
+    // 横屏 (Landscape: 320 x 240)
     esp_lcd_panel_swap_xy(panel, true);
     esp_lcd_panel_mirror(panel, false, true);
-
-    clear_screen_black_landscape();
+    clear_screen_black_landscape(panel);
 
     const world_execute_index_entry_t *index_table =
         (const world_execute_index_entry_t *)(world_execute_data_bin_start + hdr->video_index_offset);
     const uint8_t *video_stream = world_execute_data_bin_start + hdr->video_data_offset;
 
-    uint32_t total_frames = hdr->total_frames;
-    uint32_t fps = hdr->fps;
-    uint32_t sample_rate = hdr->audio_sample_rate;
+    const uint32_t total_frames = hdr->total_frames;
+    const uint32_t fps = hdr->fps;
+    const uint32_t sample_rate = hdr->audio_sample_rate;
     uint32_t current_frame = 0;
     uint32_t last_offset = 0xFFFFFFFF;
+    int buf_idx = 0;
 
     tinf_init();
-
-    ESP_LOGI(TAG, "视频任务启动: %ux%u @ %u FPS, 4 色调色板, 共 %lu 帧",
+    ESP_LOGI(TAG, "视频任务启动: %ux%u @ %u FPS, 共 %lu 帧",
              hdr->width, hdr->height, fps, (unsigned long)total_frames);
 
     while (s_running && current_frame < total_frames) {
-        if (s_restart_req) {
-            current_frame = 0;
-            last_offset = 0xFFFFFFFF;
-            clear_screen_black_landscape();
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
         if (s_paused) {
             vTaskDelay(pdMS_TO_TICKS(30));
             continue;
@@ -253,155 +208,131 @@ static void video_task(void *arg) {
 
         // 以音频采样数作为绝对时间源
         uint32_t audio_frame = (uint32_t)(((uint64_t)s_samples_played * fps) / sample_rate);
-
-        if (current_frame <= audio_frame) {
-            // 追赶或正常刷新
-            const world_execute_index_entry_t *entry = &index_table[current_frame];
-            uint32_t frame_offset = entry->offset;
-            uint16_t comp_size = entry->comp_size;
-
-            // 若与上一帧偏移不同，则解压并渲染
-            if (frame_offset != last_offset && comp_size > 0) {
-                unsigned int dest_len = sizeof(s_decomp_buf);
-                int ret = tinf_zlib_uncompress(s_decomp_buf, &dest_len, video_stream + frame_offset, comp_size);
-                if (ret != TINF_OK) {
-                    ESP_LOGW(TAG, "帧 %lu 解压警告 (%d)", (unsigned long)current_frame, ret);
-                } else {
-                    // 分片推送到屏幕 (每次 15 行，共 12 批)
-                    for (int s = 0; s < SLICE_COUNT; s++) {
-                        int y_start = s * SLICE_LINES;
-                        for (int r = 0; r < SLICE_LINES; r++) {
-                            int line = y_start + r;
-                            const uint8_t *src_line = &s_decomp_buf[line * (VIDEO_W / 4)];
-                            uint16_t *dst_line = &s_dma_slice_buf[r * VIDEO_W];
-
-                            // 2-bit 调色板查表解压: 4 像素/字节
-                            for (int x = 0; x < VIDEO_W; x += 4) {
-                                uint8_t b = src_line[x / 4];
-                                dst_line[x + 0] = s_palette[(b >> 6) & 3];
-                                dst_line[x + 1] = s_palette[(b >> 4) & 3];
-                                dst_line[x + 2] = s_palette[(b >> 2) & 3];
-                                dst_line[x + 3] = s_palette[b & 3];
-                            }
-                        }
-
-                        int screen_y1 = VIDEO_Y_OFFSET + y_start;
-                        int screen_y2 = screen_y1 + SLICE_LINES;
-                        esp_lcd_panel_draw_bitmap(panel, 0, screen_y1, VIDEO_W, screen_y2, s_dma_slice_buf);
-                    }
-                }
-                last_offset = frame_offset;
-            }
-
-            // 每 15 帧 (1 秒) 刷新一次底部进度条
-            if (current_frame % 15 == 0) {
-                draw_hud_landscape(current_frame, total_frames);
-            }
-
-            current_frame++;
-            vTaskDelay(pdMS_TO_TICKS(1));
-        } else {
-            // 视频渲染快于音频进度，等待 5ms 让出 CPU
+        if (current_frame > audio_frame) {
             vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
         }
+
+        const world_execute_index_entry_t *entry = &index_table[current_frame];
+        if (entry->offset != last_offset && entry->comp_size > 0) {
+            unsigned int dest_len = sizeof(s_decomp_buf);
+            int ret = tinf_zlib_uncompress(s_decomp_buf, &dest_len,
+                                           video_stream + entry->offset, entry->comp_size);
+            if (ret != TINF_OK) {
+                ESP_LOGW(TAG, "帧 %lu 解压失败 (%d)", (unsigned long)current_frame, ret);
+            } else {
+                for (int s = 0; s < SLICE_COUNT && s_running; s++) {
+                    uint16_t *dst = s_slice_buf[buf_idx];
+                    const uint8_t *src = &s_decomp_buf[s * SLICE_LINES * (VIDEO_W / 4)];
+                    // 2-bit 调色板查表解压: 4 像素/字节
+                    for (int i = 0; i < SLICE_LINES * (VIDEO_W / 4); i++) {
+                        uint8_t b = src[i];
+                        dst[0] = s_palette[(b >> 6) & 3];
+                        dst[1] = s_palette[(b >> 4) & 3];
+                        dst[2] = s_palette[(b >> 2) & 3];
+                        dst[3] = s_palette[b & 3];
+                        dst += 4;
+                    }
+                    int y1 = VIDEO_Y_OFFSET + s * SLICE_LINES;
+                    esp_lcd_panel_draw_bitmap(panel, 0, y1, VIDEO_W, y1 + SLICE_LINES, s_slice_buf[buf_idx]);
+                    buf_idx ^= 1;   // 下一片写另一块缓冲，这块留给 DMA
+                }
+            }
+            last_offset = entry->offset;
+        }
+
+        if (current_frame % 15 == 0) {
+            draw_hud_landscape(panel, current_frame, total_frames);
+        }
+
+        current_frame++;
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    // 播放结束，恢复竖屏配置
-    clear_screen_black_landscape();
-    esp_lcd_panel_swap_xy(panel, false);
-    esp_lcd_panel_mirror(panel, false, false);
-
-    ESP_LOGI(TAG, "视频任务退出");
-    if (s_running) {
-        s_running = false;
-        demo_request_exit();
-    }
+    ESP_LOGI(TAG, "视频任务退出 (帧 %lu/%lu)", (unsigned long)current_frame, (unsigned long)total_frames);
+    xSemaphoreGive(s_video_done);
     vTaskDelete(NULL);
 }
 
-esp_err_t world_execute_player_start(void) {
-    if (s_running) {
-        return ESP_ERR_INVALID_STATE;
-    }
+esp_err_t world_execute_player_start(world_execute_done_cb_t on_done) {
+    if (s_active) return ESP_ERR_INVALID_STATE;
 
     const world_execute_header_t *hdr = (const world_execute_header_t *)world_execute_data_bin_start;
     if (hdr->magic != WEXE_MAGIC) {
-        ESP_LOGE(TAG, "WEXE 魔数不匹配: 0x%08lX (期望 0x%08X)",
-                 (unsigned long)hdr->magic, WEXE_MAGIC);
+        ESP_LOGE(TAG, "WEXE 魔数不匹配: 0x%08lX", (unsigned long)hdr->magic);
         return ESP_ERR_INVALID_ARG;
     }
+    if (!bsp_display_panel()) return ESP_ERR_INVALID_STATE;
 
-    esp_err_t err = bsp_audio_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bsp_audio_init 失败: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (!s_audio_done) s_audio_done = xSemaphoreCreateBinary();
+    if (!s_video_done) s_video_done = xSemaphoreCreateBinary();
+    if (!s_audio_done || !s_video_done) return ESP_ERR_NO_MEM;
+    xSemaphoreTake(s_audio_done, 0);
+    xSemaphoreTake(s_video_done, 0);
 
-    err = bsp_audio_set_format(hdr->audio_sample_rate, 16, 1);
+    esp_err_t err = bsp_audio_set_format(hdr->audio_sample_rate, 16, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "bsp_audio_set_format 失败: %s", esp_err_to_name(err));
         return err;
     }
-
     bsp_audio_set_volume(s_volume);
 
-    s_running = true;
+    for (int i = 0; i < 4; i++) s_palette[i] = swap16(hdr->palette[i]);
+
+    s_done_cb = on_done;
     s_paused = false;
-    s_restart_req = false;
     s_samples_played = 0;
+    s_running = true;
 
-    // 音频任务优先级高于视频任务，保证音频时钟不卡顿；视频任务赋予 8192 栈以防解压溢出
-    BaseType_t ret_a = xTaskCreatePinnedToCore(audio_task, "wexe_audio", 4096, NULL, 5, &s_audio_task_handle, 0);
-    BaseType_t ret_v = xTaskCreatePinnedToCore(video_task, "wexe_video", 8192, NULL, 4, &s_video_task_handle, 0);
-
-    if (ret_a != pdPASS || ret_v != pdPASS) {
-        ESP_LOGE(TAG, "创建播放任务失败");
-        world_execute_player_stop();
-        return ESP_FAIL;
+    // 音频优先级高于视频，保证音频时钟不卡顿
+    if (xTaskCreate(audio_task, "wexe_audio", 4096, NULL, 6, NULL) != pdPASS) {
+        s_running = false;
+        return ESP_ERR_NO_MEM;
     }
-
+    if (xTaskCreate(video_task, "wexe_video", 6144, NULL, 4, NULL) != pdPASS) {
+        s_running = false;
+        xSemaphoreTake(s_audio_done, portMAX_DELAY);
+        return ESP_ERR_NO_MEM;
+    }
+    s_active = true;
     return ESP_OK;
 }
 
 esp_err_t world_execute_player_stop(void) {
-    if (s_running) {
-        s_running = false;
-        s_paused = false;
-        vTaskDelay(pdMS_TO_TICKS(150));
-    }
+    if (!s_active) return ESP_OK;
+    s_running = false;
+    s_paused = false;
 
-    s_audio_task_handle = NULL;
-    s_video_task_handle = NULL;
-
+    // 最坏情况:音频卡在一次 I2S 写(~32ms)，视频卡在一帧解压+刷屏(~60ms)
+    bool ok = xSemaphoreTake(s_audio_done, pdMS_TO_TICKS(2000)) == pdTRUE;
+    ok &= xSemaphoreTake(s_video_done, pdMS_TO_TICKS(2000)) == pdTRUE;
+    // 恢复竖屏配置
     esp_lcd_panel_handle_t panel = bsp_display_panel();
     if (panel) {
         esp_lcd_panel_swap_xy(panel, false);
         esp_lcd_panel_mirror(panel, false, false);
     }
 
-    return ESP_OK;
+    s_active = false;
+    s_done_cb = NULL;
+    ESP_LOGI(TAG, "播放器已停止");
+    return ok ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 bool world_execute_player_is_running(void) {
-    return s_running;
+    return s_active;
 }
 
 void world_execute_player_toggle_pause(void) {
     s_paused = !s_paused;
-    ESP_LOGI(TAG, "播放状态切换: %s", s_paused ? "暂停" : "继续");
-}
-
-void world_execute_player_restart(void) {
-    s_restart_req = true;
-    s_paused = false;
-    ESP_LOGI(TAG, "重头播放请求");
+    ESP_LOGI(TAG, "%s", s_paused ? "暂停" : "继续");
 }
 
 void world_execute_player_set_volume(uint8_t volume) {
     if (volume > 100) volume = 100;
     s_volume = volume;
     bsp_audio_set_volume(s_volume);
-    ESP_LOGI(TAG, "音量调节: %u%%", s_volume);
+    ESP_LOGI(TAG, "音量: %u%%", s_volume);
 }
 
 uint8_t world_execute_player_get_volume(void) {

@@ -37,14 +37,20 @@ typedef struct {
 } __attribute__((packed)) world_execute_index_entry_t;
 
 /**
- * @brief 启动 《world.execute(me);》 播放器
- * @return esp_err_t ESP_OK 成功启动；ESP_ERR_INVALID_STATE 正在运行中
+ * @brief 播放自然结束时的回调(在播放器任务上下文调用，只应投递事件、立即返回)
  */
-esp_err_t world_execute_player_start(void);
+typedef void (*world_execute_done_cb_t)(void);
 
 /**
- * @brief 停止播放器并释放资源
- * @return esp_err_t ESP_OK 成功停止
+ * @brief 启动 《world.execute(me);》 播放器
+ * @param on_done 自然播完时回调，可为 NULL
+ * @return esp_err_t ESP_OK 成功启动；ESP_ERR_INVALID_STATE 正在运行中
+ */
+esp_err_t world_execute_player_start(world_execute_done_cb_t on_done);
+
+/**
+ * @brief 停止播放器。会阻塞直到音频、视频任务都已真正退出、
+ *        不再访问屏幕/I2S，之后调用方可以安全地接管屏幕。
  */
 esp_err_t world_execute_player_stop(void);
 
@@ -57,11 +63,6 @@ bool world_execute_player_is_running(void);
  * @brief 切换播放/暂停状态
  */
 void world_execute_player_toggle_pause(void);
-
-/**
- * @brief 从头重新播放
- */
-void world_execute_player_restart(void);
 
 /**
  * @brief 设置播放音量 (0~100)
